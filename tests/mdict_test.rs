@@ -1,6 +1,7 @@
 use base64::prelude::*;
 use hex::FromHex;
 use mdict_analysis::readmdict::MDict;
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 
@@ -18,13 +19,17 @@ fn test_mdx() {
 
     let mut m1 = MDict::new(file.as_str(), None, None, None);
 
-    for (key, value) in m1.items().iter().take(10) {
-        let k = String::from_utf8_lossy(key);
-        let val = String::from_utf8_lossy(value);
-        println!("key: {:?}, value: {:?}", k, val);
-    }
+    let dict = m1
+        .items()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<HashMap<_, _>>();
 
-    assert_ne!(m1.items().len(), 0);
+    assert_ne!(dict.len(), 0);
+    assert_eq!(
+        dict.get("ärcher".as_bytes()),
+        Some(&b"German order test\r\n".to_vec())
+    );
 }
 
 #[test]
@@ -35,7 +40,17 @@ fn test_regcode_mdx() {
 
     let mut m1 = MDict::new(file.as_str(), None, Some((&regcode, userid)), None);
 
-    assert_ne!(m1.items().len(), 0);
+    let dict = m1
+        .items()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<HashMap<_, _>>();
+
+    assert_ne!(dict.len(), 0);
+    assert_eq!(
+        dict.get("ärcher".as_bytes()),
+        Some(&b"German order test\r\n".to_vec())
+    );
 }
 
 #[test]
