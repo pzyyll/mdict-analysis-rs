@@ -1,5 +1,5 @@
 [package]
-name = "mdict-rs"
+name = "mdict_analysis"
 version = "0.1.0"
 edition = "2021"
 
