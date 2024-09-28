@@ -1,6 +1,8 @@
+#![allow(unused)]
+
 use byteorder::{ByteOrder, LittleEndian};
 
-const VERSION: &str = "p4.0";
+// const VERSION: &str = "p4.0";
 
 pub struct Salsa20 {
     pub ctx: [i32; 16],
@@ -171,13 +173,18 @@ fn rot32(w: i32, n_left: i32) -> i32 {
     rrr | (sllllll << n_left)
 }
 
-fn main() {
-    // Example usage
-    let key: &[u8; 32] = b"This is 32-byte key for salsa20a";
-    let iv = b"8Byte iv";
-    let data = b"Hello, Salsa20!aaa";
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut salsa20 = Salsa20::new(Some(key), Some(iv), 20);
-    let encrypted = salsa20.encrypt_bytes(data);
-    println!("Encrypted: {:?}", encrypted);
+    #[test]
+    fn test_salsa20() {
+        let key: &[u8; 32] = b"This is 32-byte key for salsa20a";
+        let iv = b"8Byte iv";
+        let data = b"Hello, Salsa20!aaa";
+
+        let mut salsa20 = Salsa20::new(Some(key), Some(iv), 20);
+        let encrypted = salsa20.encrypt_bytes(data);
+        println!("Encrypted: {:?}", encrypted);
+    }
 }

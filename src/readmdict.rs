@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::{
     collections::HashMap,
     fs::File,
@@ -29,6 +31,15 @@ impl NumberFormat {
             NumberFormat::BQ => ">Q",
             NumberFormat::BH => ">H",
             NumberFormat::BB => ">B",
+        }
+    }
+
+    fn size(&self) -> usize {
+        match self {
+            NumberFormat::BI => 4,
+            NumberFormat::BQ => 8,
+            NumberFormat::BH => 2,
+            NumberFormat::BB => 1,
         }
     }
 
@@ -148,14 +159,29 @@ pub struct MDict {
     key_list: Vec<(u32, Vec<u8>)>,
     version: f32,
     key_block_offset: u64,
-    number_width: u32,
+    // number_width: u32,
     number_format: NumberFormat,
     record_block_offset: u64,
     record_index_offset: u64,
     key_data_offset: u64,
     key_index_offset: u64,
     num_entries: u32,
+    record_block_info_list: Vec<(u32, u32)>,
+    items: Vec<(Vec<u8>, Vec<u8>)>,
 }
+
+// struct MDictIterator<'a> {
+//     mdict: &'a mut MDict,
+//     index: usize,
+// }
+
+// impl<'a> Iterator for MDictIterator<'a> {
+//     type Item = (Vec<u8>, Vec<u8>);
+
+//     fn next(&mut self) -> Option<Self::Item> {
+//         None
+//     }
+// }
 
 impl MDict {
     pub fn new(
@@ -175,13 +201,14 @@ impl MDict {
             key_list: Vec::new(),
             version: 0.0,
             key_block_offset: 0,
-            number_width: 0,
             number_format: NumberFormat::BQ,
             record_block_offset: 0,
             record_index_offset: 0,
             key_data_offset: 0,
             key_index_offset: 0,
             num_entries: 0,
+            record_block_info_list: Vec::new(),
+            items: Vec::new(),
         };
 
         if fname.ends_with(".mdx") {
@@ -231,6 +258,10 @@ impl MDict {
         } else {
             self.read_records_v3().unwrap()
         }
+    }
+
+    pub fn iter(&mut self) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
+        self.items().into_iter()
     }
 
     fn read_records_v3(&mut self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
@@ -398,10 +429,8 @@ impl MDict {
             .parse::<f32>()
             .expect("Failed to parse version");
         if self.version < 2.0 {
-            self.number_width = 4;
             self.number_format = NumberFormat::BI;
         } else {
-            self.number_width = 8;
             self.number_format = NumberFormat::BQ;
             if self.version >= 3.0 {
                 self.encoding = "UTF-8".to_string();
@@ -622,6 +651,7 @@ impl MDict {
         let num_record_blocks = self.read_number(&mut f);
         let num_entries = self.read_number(&mut f);
         assert_eq!(num_entries, self.num_entries as u64);
+
         let record_block_info_size = self.read_number(&mut f);
         let record_block_size = self.read_number(&mut f);
 
@@ -632,7 +662,7 @@ impl MDict {
             let compressed_size = self.read_number(&mut f) as usize;
             let decompressed_size = self.read_number(&mut f) as usize;
             record_block_info_list.push((compressed_size, decompressed_size));
-            size_counter += self.number_width * 2;
+            size_counter += self.number_format.size() * 2;
         }
         assert_eq!(size_counter as u64, record_block_info_size);
 
@@ -797,7 +827,7 @@ impl MDict {
         while key_start_index < key_block.len() {
             // the corresponding record's offset in record block
             let key_id = self.number_format.read_buff(
-                &key_block[key_start_index..key_start_index + self.number_width as usize],
+                &key_block[key_start_index..key_start_index + self.number_format.size()],
             );
             if key_id.is_err() {
                 break;
@@ -809,7 +839,7 @@ impl MDict {
                 (b"\x00".to_vec(), 1)
             };
 
-            let mut i = key_start_index + self.number_width as usize;
+            let mut i = key_start_index + self.number_format.size();
             let mut key_end_index = key_block.len();
             while i < key_block.len() {
                 if &key_block[i..i + width] == delimiter {
@@ -821,7 +851,7 @@ impl MDict {
 
             let (decode_str, _, _) = Encoding::for_label(self.encoding.as_bytes())
                 .unwrap()
-                .decode(&key_block[key_start_index + self.number_width as usize..key_end_index]);
+                .decode(&key_block[key_start_index + self.number_format.size()..key_end_index]);
 
             let key_text = decode_str.trim().as_bytes().to_vec();
 

@@ -1,6 +1,8 @@
+#![allow(non_snake_case)]
+
 use byteorder::{ByteOrder, LittleEndian};
 
-const VERSION: &str = "p4.0";
+// const VERSION: &str = "p4.0";
 
 fn f(j: usize, x: u32, y: u32, z: u32) -> u32 {
     assert!(j < 64);
@@ -138,13 +140,19 @@ pub fn hexstr(bstr: &[u8]) -> String {
     bstr.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn main() {
-    let message = b"The quick brown fox jumps over the lazy dog";
-    let digest = ripemd128(message);
-    assert_eq!(hexstr(&digest), "3fa9b57f053c053fbe2735b2380db596");
-    println!("Digest: {}", hexstr(&digest));
-    println!("f: {}", f(5, 22, 34, 35));
-    println!("K: {}", K(5));
-    println!("Kp: {}", Kp(5));
-    println!("pad_and_split: {:?}", pad_and_split(message));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ripemd128() {
+        let message = b"The quick brown fox jumps over the lazy dog";
+        let digest = ripemd128(message);
+        assert_eq!(hexstr(&digest), "3fa9b57f053c053fbe2735b2380db596");
+        println!("Digest: {}", hexstr(&digest));
+        println!("f: {}", f(5, 22, 34, 35));
+        println!("K: {}", K(5));
+        println!("Kp: {}", Kp(5));
+        println!("pad_and_split: {:?}", pad_and_split(message));
+    }
 }
