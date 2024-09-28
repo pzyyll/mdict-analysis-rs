@@ -21,8 +21,7 @@ fn test_mdx() {
 
     let dict = m1
         .items()
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k, v))
         .collect::<HashMap<_, _>>();
 
     assert_ne!(dict.len(), 0);
@@ -42,8 +41,7 @@ fn test_regcode_mdx() {
 
     let dict = m1
         .items()
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k, v))
         .collect::<HashMap<_, _>>();
 
     assert_ne!(dict.len(), 0);
@@ -55,11 +53,14 @@ fn test_regcode_mdx() {
 
 #[test]
 fn test_mdd() {
-    let file = get_path("test.mdd");
+    let mut md1 = MDict::new(r"tests/test.mdd", None, None, None);
 
-    let mut md1 = MDict::new(file.as_str(), None, None, None);
+    let dict = md1
+        .items()
+        .map(|(k, v)| (k, v))
+        .collect::<HashMap<_, _>>();
 
-    for (key, value) in md1.items().iter() {
+    for (key, value) in dict.iter() {
         let k = String::from_utf8_lossy(key);
         let v = BASE64_STANDARD.encode(value);
         println!(
@@ -70,5 +71,5 @@ fn test_mdd() {
         );
     }
 
-    assert_ne!(md1.items().len(), 0);
+    assert_ne!(dict.len(), 0);
 }

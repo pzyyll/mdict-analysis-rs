@@ -1,9 +1,10 @@
 #![allow(unused)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs::File,
-    io::{Cursor, Read, Seek, SeekFrom},
+    io::{BufReader, Cursor, Read, Seek, SeekFrom, Write},
+    iter, result,
 };
 
 use adler2::adler32_slice;
@@ -148,6 +149,8 @@ fn zlib_decompress(data: &[u8]) -> Vec<u8> {
     decompressed_bytes
 }
 
+type Item = (Vec<u8>, Vec<u8>);
+
 pub struct MDict {
     fname: String,
     encoding: String,
@@ -166,22 +169,286 @@ pub struct MDict {
     key_data_offset: u64,
     key_index_offset: u64,
     num_entries: u32,
-    record_block_info_list: Vec<(u32, u32)>,
-    items: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
-// struct MDictIterator<'a> {
-//     mdict: &'a mut MDict,
-//     index: usize,
-// }
+struct MdictIteratorData<'a> {
+    mdict: &'a mut MDict,
+    buff_reader: Option<BufReader<File>>,
+    record_block_size: u64,
+    record_block_info_list: VecDeque<(usize, usize)>,
+    size_counter: usize,
 
-// impl<'a> Iterator for MDictIterator<'a> {
-//     type Item = (Vec<u8>, Vec<u8>);
+    key_list_index: usize,
+    record_block: Option<Vec<u8>>,
+    record_block_offset: usize,
+}
 
-//     fn next(&mut self) -> Option<Self::Item> {
-//         None
-//     }
-// }
+impl<'a> MdictIteratorData<'a> {
+    fn new(mdict: &'a mut MDict) -> Self {
+        MdictIteratorData {
+            mdict,
+            buff_reader: None,
+            record_block_size: 0,
+            record_block_info_list: VecDeque::new(),
+            size_counter: 0,
+            key_list_index: 0,
+            record_block: None,
+            record_block_offset: 0,
+        }
+    }
+}
+
+struct MDictIteratorV1V2<'a> {
+    data: MdictIteratorData<'a>,
+}
+
+impl<'a> MDictIteratorV1V2<'a> {
+    fn new(mdict: &'a mut MDict) -> Self {
+        let mut iter = MDictIteratorV1V2 {
+            data: MdictIteratorData::new(mdict),
+        };
+        iter.init();
+        iter
+    }
+
+    fn init(&mut self) -> std::io::Result<()> {
+        let mut f = File::open(&self.data.mdict.fname)?;
+
+        self.data.buff_reader = Some(BufReader::new(f));
+        let mut f = self.data.buff_reader.as_mut().unwrap();
+
+        f.seek(SeekFrom::Start(self.data.mdict.record_block_offset))?;
+
+        let num_record_blocks = self.data.mdict.read_number(&mut f);
+        let num_entries = self.data.mdict.read_number(&mut f);
+        assert_eq!(num_entries, self.data.mdict.num_entries as u64);
+
+        let record_block_info_size = self.data.mdict.read_number(&mut f);
+
+        self.data.record_block_size = self.data.mdict.read_number(&mut f);
+
+        // Record block info section
+        let mut check_record_block_info_size = 0;
+        for _ in 0..num_record_blocks {
+            let compressed_size = self.data.mdict.read_number(&mut f) as usize;
+            let decompressed_size = self.data.mdict.read_number(&mut f) as usize;
+            self.data
+                .record_block_info_list
+                .push_back((compressed_size, decompressed_size));
+            check_record_block_info_size += self.data.mdict.number_format.size() * 2;
+        }
+        assert_eq!(check_record_block_info_size as u64, record_block_info_size);
+
+        Ok(())
+    }
+
+    fn get_item(&mut self) -> std::io::Result<Item> {
+        if let Some(record_block) = &self.data.record_block {
+            let record_block_len = record_block.len();
+            if let Some((record_start, key_text)) =
+                self.data.mdict.key_list.get(self.data.key_list_index)
+            {
+                let record_start = *record_start as usize;
+
+                // Reach the end of current record block
+                if record_start - self.data.record_block_offset >= record_block_len {
+                    self.data.record_block_offset += record_block_len;
+                    self.data.record_block = None;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "No more items",
+                    ));
+                }
+
+                // Record end index
+                let record_end = if self.data.key_list_index < self.data.mdict.key_list.len() - 1 {
+                    self.data.mdict.key_list[self.data.key_list_index + 1].0 as usize
+                } else {
+                    record_block_len + self.data.record_block_offset
+                };
+
+                self.data.key_list_index += 1;
+                let start = record_start - self.data.record_block_offset;
+                let end = record_end - self.data.record_block_offset;
+                let data = &record_block[start..end];
+
+                return Ok((key_text.clone(), self.data.mdict.treat_record_data(data)));
+            }
+            self.data.record_block_offset += record_block_len;
+            self.data.record_block = None;
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No more items",
+        ))
+    }
+}
+
+impl<'a> Iterator for MDictIteratorV1V2<'a> {
+    type Item = Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Ok(item) = self.get_item() {
+            return Some(item);
+        }
+
+        while let Some((compressed_size, decompressed_size)) =
+            self.data.record_block_info_list.pop_front()
+        {
+            let mut f = self.data.buff_reader.as_mut().unwrap();
+
+            let mut compressed_data = vec![0; compressed_size];
+            f.read_exact(compressed_data.as_mut_slice()).unwrap();
+            self.data.size_counter += compressed_size;
+
+            if let Ok(item) = self.get_item() {
+                return Some(item);
+            }
+        }
+        assert_eq!(self.data.size_counter, self.data.record_block_size as usize);
+        None
+    }
+}
+
+struct MDictIteratorV3<'a> {
+    data: MdictIteratorData<'a>,
+    record_index: Vec<(u32, u32)>,
+    num_record_blocks: u32,
+    num_record_blocks_idx: u32,
+}
+
+impl<'a> MDictIteratorV3<'a> {
+    fn new(mdict: &'a mut MDict) -> Self {
+        let mut iterv3 = MDictIteratorV3 {
+            data: MdictIteratorData::new(mdict),
+            record_index: Vec::new(),
+            num_record_blocks: 0,
+            num_record_blocks_idx: 0,
+        };
+        iterv3.init().expect("Failed to initialize MDictIteratorV3");
+        iterv3
+    }
+
+    fn init(&mut self) -> std::io::Result<()> {
+        self.data.buff_reader = Some(BufReader::new(File::open(&self.data.mdict.fname)?));
+        let mut f = self.data.buff_reader.as_mut().unwrap();
+
+        self.record_index = self.data.mdict.read_record_index(&mut f)?;
+
+        f.seek(SeekFrom::Start(self.data.mdict.record_block_offset))?;
+        self.num_record_blocks = self.data.mdict.read_u32(&mut f);
+        let _ = self.data.mdict.read_number(&mut f);
+
+        Ok(())
+    }
+
+    fn get_record_block(&mut self) -> std::io::Result<Vec<u8>> {
+        let mut f = self.data.buff_reader.as_mut().unwrap();
+        let decompressed_size = self.data.mdict.read_u32(&mut f);
+        let compressed_size = self.data.mdict.read_u32(&mut f);
+
+        while self.num_record_blocks_idx < self.num_record_blocks {
+            let idx = self.num_record_blocks_idx as usize;
+            self.num_record_blocks_idx += 1;
+
+            // Check against the record index information
+            if (compressed_size + 8, decompressed_size) != self.record_index[idx] {
+                let compressed_size = self.record_index[idx].0 - 8;
+                // Skip to the next block
+                println!("Skip (potentially) damaged record block");
+                f.seek(SeekFrom::Current(compressed_size as i64))?;
+                continue;
+            }
+
+            let mut compressed_data = vec![0; compressed_size as usize];
+            f.read_exact(&mut compressed_data)?;
+            return Ok(self
+                .data
+                .mdict
+                .decode_block(&compressed_data, decompressed_size));
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No more record blocks",
+        ))
+    }
+
+    fn get_item(&mut self) -> std::io::Result<Item> {
+        if self.data.record_block.is_none() {
+            self.data.record_block = self.get_record_block().ok();
+        }
+
+        if let Some(record_block) = &self.data.record_block {
+            let record_block_len = record_block.len();
+
+            let idx = self.data.key_list_index;
+
+            let offset = self.data.record_block_offset;
+
+            if let Some((record_start, key_text)) = self.data.mdict.key_list.get(idx) {
+                let record_start = *record_start as usize;
+
+                // Reach the end of current record block
+                if record_start - offset >= record_block_len {
+                    self.data.record_block = None;
+                    self.data.record_block_offset += record_block_len;
+                    return self.get_item();
+                }
+
+                let record_end = if idx < self.data.mdict.key_list.len() - 1 {
+                    self.data.mdict.key_list[idx + 1].0 as usize
+                } else {
+                    record_block_len + offset
+                };
+
+                self.data.key_list_index += 1;
+                let data = record_block[record_start - offset..record_end - offset].to_vec();
+                return Ok((key_text.clone(), self.data.mdict.treat_record_data(&data)));
+            } else {
+                self.data.record_block = None;
+            }
+        }
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No more items",
+        ))
+    }
+}
+
+impl<'a> Iterator for MDictIteratorV3<'a> {
+    type Item = Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.get_item().ok()
+    }
+}
+
+struct MDictIterator<'a> {
+    iter: Box<dyn Iterator<Item = Item> + 'a>,
+}
+
+impl<'a> MDictIterator<'a> {
+    fn new(mdict: &'a mut MDict) -> Self {
+        if mdict.version < 3.0 {
+            MDictIterator {
+                iter: Box::new(MDictIteratorV1V2::new(mdict)),
+            }
+        } else {
+            MDictIterator {
+                iter: Box::new(MDictIteratorV3::new(mdict)),
+            }
+        }
+    }
+}
+
+impl<'a> Iterator for MDictIterator<'a> {
+    type Item = Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
 
 impl MDict {
     pub fn new(
@@ -207,8 +474,6 @@ impl MDict {
             key_data_offset: 0,
             key_index_offset: 0,
             num_entries: 0,
-            record_block_info_list: Vec::new(),
-            items: Vec::new(),
         };
 
         if fname.ends_with(".mdx") {
@@ -252,88 +517,20 @@ impl MDict {
         self.key_list.iter().map(|(_, v)| v.to_vec()).collect()
     }
 
-    pub fn items(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        if self.version < 3.0 {
-            self.read_records_v1v2().unwrap()
-        } else {
-            self.read_records_v3().unwrap()
-        }
+    pub fn items<'a>(&'a mut self) -> impl Iterator<Item = Item> + 'a {
+        MDictIterator::new(self)
     }
 
-    pub fn iter(&mut self) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
-        self.items().into_iter()
-    }
-
-    fn read_records_v3(&mut self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let record_index = self.read_record_index()?;
-
-        let mut f = File::open(&self.fname)?;
-        f.seek(SeekFrom::Start(self.record_block_offset))?;
-
-        let mut offset = 0;
-        let mut i = 0;
-
-        let num_record_blocks = self.read_u32(&mut f);
-        let _ = self.read_number(&mut f);
-
-        let mut results = Vec::new();
-
-        for j in 0..num_record_blocks {
-            let decompressed_size = self.read_u32(&mut f);
-            let compressed_size = self.read_u32(&mut f);
-
-            // Check against the record index information
-            if (compressed_size + 8, decompressed_size) != record_index[j as usize] {
-                let compressed_size = record_index[j as usize].0 - 8;
-                // let decompressed_size = record_index[j as usize].1;
-                // Skip to the next block
-                println!("Skip (potentially) damaged record block");
-                // let mut skip_buffer = vec![0; compressed_size as usize];
-                // f.read_exact(&mut skip_buffer)?;
-                f.seek(SeekFrom::Current(compressed_size as i64))?;
-                continue;
-            }
-
-            let mut compressed_data = vec![0; compressed_size as usize];
-            f.read_exact(&mut compressed_data)?;
-            let record_block = self.decode_block(&compressed_data, decompressed_size);
-
-            // Split record block according to the offset info from key block
-            while i < self.key_list.len() {
-                let (record_start, key_text) = &self.key_list[i];
-                // Reach the end of current record block
-                if record_start - offset >= record_block.len() as u32 {
-                    break;
-                }
-                // Record end index
-                let record_end = if i < self.key_list.len() - 1 {
-                    self.key_list[i + 1].0
-                } else {
-                    record_block.len() as u32 + offset
-                };
-                i += 1;
-                let data = record_block
-                    [(record_start - offset) as usize..(record_end - offset) as usize]
-                    .to_vec();
-                results.push((key_text.clone(), self.treat_record_data(&data)));
-            }
-            offset += record_block.len() as u32;
-        }
-
-        Ok(results)
-    }
-
-    fn read_record_index(&mut self) -> std::io::Result<Vec<(u32, u32)>> {
-        let mut f = File::open(&self.fname)?;
+    fn read_record_index<R: Read + Seek>(&mut self, f: &mut R) -> std::io::Result<Vec<(u32, u32)>> {
         f.seek(SeekFrom::Start(self.record_index_offset))?;
 
-        let num_record_blocks = self.read_u32(&mut f);
-        let _num_bytes = self.read_number(&mut f);
+        let num_record_blocks = self.read_u32(f);
+        let _num_bytes = self.read_number(f);
 
         let mut record_index = Vec::new();
         for _ in 0..num_record_blocks {
-            let decompressed_size = self.read_u32(&mut f);
-            let compressed_size = self.read_u32(&mut f) as usize;
+            let decompressed_size = self.read_u32(f);
+            let compressed_size = self.read_u32(f) as usize;
             let mut compressed_data = vec![0; compressed_size];
             f.read_exact(&mut compressed_data)?;
             let record_block = self.decode_block(&compressed_data, decompressed_size);
@@ -477,11 +674,11 @@ impl MDict {
         self.number_format.read(f).unwrap()
     }
 
-    fn read_u64(&mut self, f: &mut File) -> u64 {
+    fn read_u64<R: Read>(&mut self, f: &mut R) -> u64 {
         f.read_u64::<BigEndian>().unwrap()
     }
 
-    fn read_u32(&mut self, f: &mut File) -> u32 {
+    fn read_u32<R: Read>(&mut self, f: &mut R) -> u32 {
         f.read_u32::<BigEndian>().unwrap()
     }
 
@@ -642,67 +839,6 @@ impl MDict {
         }
 
         key_list
-    }
-
-    fn read_records_v1v2(&mut self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let mut f = File::open(&self.fname)?;
-        f.seek(SeekFrom::Start(self.record_block_offset))?;
-
-        let num_record_blocks = self.read_number(&mut f);
-        let num_entries = self.read_number(&mut f);
-        assert_eq!(num_entries, self.num_entries as u64);
-
-        let record_block_info_size = self.read_number(&mut f);
-        let record_block_size = self.read_number(&mut f);
-
-        // Record block info section
-        let mut record_block_info_list = Vec::new();
-        let mut size_counter = 0;
-        for _ in 0..num_record_blocks {
-            let compressed_size = self.read_number(&mut f) as usize;
-            let decompressed_size = self.read_number(&mut f) as usize;
-            record_block_info_list.push((compressed_size, decompressed_size));
-            size_counter += self.number_format.size() * 2;
-        }
-        assert_eq!(size_counter as u64, record_block_info_size);
-
-        // Actual record block
-        let mut offset = 0;
-        let mut i = 0;
-        let mut size_counter = 0;
-        let mut results = Vec::with_capacity(self.key_list.len());
-
-        for (compressed_size, decompressed_size) in record_block_info_list {
-            let mut compressed_data = vec![0; compressed_size];
-            f.read_exact(&mut compressed_data)?;
-            let record_block = self.decode_block(&compressed_data, decompressed_size as u32);
-
-            // Split record block according to the offset info from key block
-            while i < self.key_list.len() {
-                let (record_start, key_text) = &self.key_list[i];
-                // Reach the end of current record block
-                if record_start - offset >= record_block.len() as u32 {
-                    break;
-                }
-                // Record end index
-                let record_end = if i < self.key_list.len() - 1 {
-                    self.key_list[i + 1].0
-                } else {
-                    record_block.len() as u32 + offset
-                };
-                i += 1;
-                let start = (record_start - offset) as usize;
-                let end = (record_end - offset) as usize;
-                let data = &record_block[start..end];
-                let value = self.treat_record_data(data);
-                results.push((key_text.clone(), value));
-            }
-            offset += record_block.len() as u32;
-            size_counter += compressed_size;
-        }
-        assert_eq!(size_counter, record_block_size as usize);
-
-        Ok(results)
     }
 
     fn treat_record_data(&self, data: &[u8]) -> Vec<u8> {
