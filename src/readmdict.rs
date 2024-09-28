@@ -487,6 +487,18 @@ impl MDict {
         mdict
     }
 
+    pub fn keys<'a>(&'a mut self) -> impl Iterator<Item = Vec<u8>> + 'a {
+        self.key_list.iter().map(|(_, v)| v.to_vec()).into_iter()
+    }
+
+    pub fn items<'a>(&'a mut self) -> impl Iterator<Item = Item> + 'a {
+        MDictIterator::new(self)
+    }
+
+    pub fn header(&self) -> &HashMap<String, String> {
+        &self.header
+    }
+
     fn init(&mut self, passcode: Option<(&[u8], &[u8])>) {
         self.header = self.read_header();
 
@@ -511,14 +523,6 @@ impl MDict {
     fn init_mdd(&mut self, passcode: Option<(&[u8], &[u8])>) {
         self.encoding = "UTF-16".to_string();
         self.init(passcode);
-    }
-
-    fn keys(&mut self) -> Vec<Vec<u8>> {
-        self.key_list.iter().map(|(_, v)| v.to_vec()).collect()
-    }
-
-    pub fn items<'a>(&'a mut self) -> impl Iterator<Item = Item> + 'a {
-        MDictIterator::new(self)
     }
 
     fn read_record_index<R: Read + Seek>(&mut self, f: &mut R) -> std::io::Result<Vec<(u32, u32)>> {

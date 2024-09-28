@@ -19,12 +19,15 @@ fn test_mdx() {
 
     let mut m1 = MDict::new(file.as_str(), None, None, None);
 
+    println!("mdx version: {:?}", m1.header());
+
     let dict = m1
         .items()
         .map(|(k, v)| (k, v))
         .collect::<HashMap<_, _>>();
 
     assert_ne!(dict.len(), 0);
+    assert_eq!(dict.len(), m1.keys().collect::<Vec<_>>().len());
     assert_eq!(
         dict.get("ärcher".as_bytes()),
         Some(&b"German order test\r\n".to_vec())
