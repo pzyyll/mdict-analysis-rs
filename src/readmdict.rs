@@ -301,6 +301,12 @@ impl<'a> Iterator for MDictIteratorV1V2<'a> {
             f.read_exact(compressed_data.as_mut_slice()).unwrap();
             self.data.size_counter += compressed_size;
 
+            let record_block = self
+                .data
+                .mdict
+                .decode_block(&compressed_data, decompressed_size as u32);
+            self.data.record_block = Some(record_block);
+
             if let Ok(item) = self.get_item() {
                 return Some(item);
             }
@@ -747,10 +753,10 @@ impl MDict {
         };
 
         let mut block = vec![0u8; num_bytes as usize];
-        f.read_exact(&mut block).expect("Unable to read block data");
+        f.read(&mut block).expect("Unable to read block data");
 
         let mut key_block_info = vec![0u8; 8];
-        f.read_exact(&mut key_block_info)
+        f.read(&mut key_block_info)
             .expect("Unable to read key block info");
         if self.version >= 2.0 {
             assert_eq!(&key_block_info[..4], b"\x02\x00\x00\x00");
@@ -759,7 +765,7 @@ impl MDict {
         loop {
             let fpos = f.seek(SeekFrom::Current(0)).unwrap();
             let mut t = vec![0u8; 1024];
-            f.read_exact(&mut t).expect("Unable to read block data");
+            f.read(&mut t).expect("Unable to read block data");
             if let Some(index) = t.iter().position(|&x| x == key_block_type[0]) {
                 key_block_info.extend(&t[..index]);
                 f.seek(SeekFrom::Start(fpos + index as u64)).unwrap();
@@ -775,7 +781,7 @@ impl MDict {
         let mut key_block_compressed = vec![0u8; key_block_size as usize];
 
         let mut key_list = Vec::new();
-        if f.read_exact(&mut key_block_compressed).is_ok() {
+        if f.read(&mut key_block_compressed).is_ok() {
             key_list = self.decode_key_block(&key_block_compressed, &key_block_info_list);
         }
         self.record_block_offset = f.seek(SeekFrom::Current(0)).unwrap();

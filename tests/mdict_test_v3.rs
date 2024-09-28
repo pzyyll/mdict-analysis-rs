@@ -2,15 +2,9 @@ use base64::prelude::*;
 use hex::FromHex;
 use mdict_analysis::readmdict::MDict;
 use std::collections::HashMap;
-use std::env;
-use std::path::PathBuf;
 
 fn get_path(filename: &str) -> String {
-    let current_file_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("tests")
-        .join(filename);
-
-    current_file_path.to_str().unwrap().to_owned()
+    "tests/".to_string() + filename
 }
 
 #[test]
@@ -21,10 +15,7 @@ fn test_mdx() {
 
     println!("mdx version: {:?}", m1.header());
 
-    let dict = m1
-        .items()
-        .map(|(k, v)| (k, v))
-        .collect::<HashMap<_, _>>();
+    let dict = m1.items().map(|(k, v)| (k, v)).collect::<HashMap<_, _>>();
 
     assert_ne!(dict.len(), 0);
     assert_eq!(dict.len(), m1.keys().collect::<Vec<_>>().len());
@@ -42,10 +33,7 @@ fn test_regcode_mdx() {
 
     let mut m1 = MDict::new(file.as_str(), None, Some((&regcode, userid)), None);
 
-    let dict = m1
-        .items()
-        .map(|(k, v)| (k, v))
-        .collect::<HashMap<_, _>>();
+    let dict = m1.items().map(|(k, v)| (k, v)).collect::<HashMap<_, _>>();
 
     assert_ne!(dict.len(), 0);
     assert_eq!(
@@ -58,10 +46,7 @@ fn test_regcode_mdx() {
 fn test_mdd() {
     let mut md1 = MDict::new(r"tests/test.mdd", None, None, None);
 
-    let dict = md1
-        .items()
-        .map(|(k, v)| (k, v))
-        .collect::<HashMap<_, _>>();
+    let dict = md1.items().map(|(k, v)| (k, v)).collect::<HashMap<_, _>>();
 
     for (key, value) in dict.iter() {
         let k = String::from_utf8_lossy(key);
